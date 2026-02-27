@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <title>Neon Car Shooter</title>
+  <link rel="stylesheet" href="style.css"/>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="c"></canvas>
+
+    <div id="hud">
+      <div class="pill">Очки: <span id="score">0</span></div>
+      <div class="pill">HP: <span id="hp">100</span></div>
+      <div class="pill">x<span id="mult">1</span></div>
+      <div class="pill">DMG: <span id="dmg">1</span></div>
+      <div class="pill">GUNS: <span id="guns">1</span></div>
+    </div>
+
+    <div id="overlay" class="hidden">
+      <div class="card">
+        <h1 id="title">Neon Car Shooter</h1>
+        <p id="subtitle">Тапни “Старт”.</p>
+        <div class="row">
+          <button id="startBtn">СТАРТ</button>
+          <button id="muteBtn">ЗВУК: ON</button>
+        </div>
+        <p class="hint">
+          Управление: левый палец — движение (джойстик), правый — стрельба (тап/удержание).
+        </p>
+      </div>
+    </div>
+
+    <div id="controls">
+      <div id="joy">
+        <div id="joyBase"></div>
+        <div id="joyKnob"></div>
+      </div>
+      <button id="fire">FIRE</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
