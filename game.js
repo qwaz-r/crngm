@@ -30,7 +30,6 @@
   const subtitle = document.getElementById("subtitle");
   const startBtn = document.getElementById("startBtn");
   const muteBtn = document.getElementById("muteBtn");
-  const fireBtn = document.getElementById("fire");
 
   let muted = false;
   muteBtn.addEventListener("click", () => {
@@ -46,6 +45,21 @@
     return dx * dx + dy * dy;
   };
 
+  // ===== Bullet tiers =====
+  const BULLET_TIERS = [
+    { name: "GRAY", hue: 0, sat: 0, light: 72, rateMul: 0.65, dmgAdd: 0, glowA: 0.10 },
+    { name: "CYAN", hue: 190, sat: 88, light: 66, rateMul: 0.85, dmgAdd: 0, glowA: 0.14 },
+    { name: "BLUE", hue: 215, sat: 96, light: 62, rateMul: 1.00, dmgAdd: 1, glowA: 0.18 },
+    { name: "VIOLET", hue: 270, sat: 96, light: 64, rateMul: 1.10, dmgAdd: 2, glowA: 0.22 },
+    { name: "RED", hue: 8, sat: 96, light: 62, rateMul: 1.18, dmgAdd: 3, glowA: 0.26 },
+    { name: "GOLD", hue: 44, sat: 96, light: 62, rateMul: 1.25, dmgAdd: 4, glowA: 0.30 },
+  ];
+
+  function tierColor(tierIndex, alpha = 0.95) {
+    const t = BULLET_TIERS[clamp(tierIndex, 0, BULLET_TIERS.length - 1)];
+    return `hsla(${t.hue}, ${t.sat}%, ${t.light}%, ${alpha})`;
+  }
+
   // ===== Game state =====
   const W = () => canvas.clientWidth;
   const H = () => canvas.clientHeight;
@@ -59,8 +73,7 @@
     mult: 1,
     hp: 100,
     shake: 0,
-    laneGlow: 0,
-    difficulty: 1
+    difficulty: 1,
   };
 
   // ===== Player =====
@@ -69,25 +82,33 @@
     vx: 0, vy: 0,
     r: 18,
     speed: 380,
-    fireRate: 9,
     fireCooldown: 0,
     invuln: 0,
-    dmg: 1,
-    guns: 1,        // 1,2,3,5
-    bulletHue: 195, // 210=синее, 0=красное
+
+    tier: 0,
+    guns: 1,          // до 9
+    baseDmg: 1,
+    baseFireRate: 6.0,
   };
 
   // ===== Entities =====
   const bullets = [];
+  const enemyBullets = [];
   const enemies = [];
   const particles = [];
   const pickups = [];
+  const allies = [];
+  const skidMarks = [];
+
+  // ===== Boss =====
+  let bossTimer = 0;
+  let bossAlive = false;
 
   function updateHud() {
     elScore.textContent = String(Math.floor(world.score));
     elHp.textContent = String(Math.max(0, Math.floor(world.hp)));
     elMult.textContent = String(world.mult);
-    elDmg.textContent = String(player.dmg);
+    elDmg.textContent = String(player.baseDmg + BULLET_TIERS[player.tier].dmgAdd);
     elGuns.textContent = String(player.guns);
   }
 
@@ -104,152 +125,143 @@
     player.vx = player.vy = 0;
     player.fireCooldown = 0;
     player.invuln = 0;
-    player.dmg = 1;
+
+    player.tier = 0;
     player.guns = 1;
-    player.bulletHue = 195;
+    player.baseDmg = 1;
+    player.baseFireRate = 6.0;
 
     bullets.length = 0;
+    enemyBullets.length = 0;
     enemies.length = 0;
     particles.length = 0;
     pickups.length = 0;
+    allies.length = 0;
+    skidMarks.length = 0;
+
+    bossTimer = 0;
+    bossAlive = false;
 
     updateHud();
   }
 
   // ===== Spawners =====
   let enemySpawnT = 0;
-  let pickupSpawnT = 0;
 
   function spawnEnemy() {
-    const roll = Math.random();
+    const t = world.time;
 
+    const truckChance = clamp(0.06 + (t / 240) * 0.20, 0.06, 0.26);
+    const vanChance = clamp(0.18 + (t / 300) * 0.10, 0.18, 0.28);
+
+    const r = Math.random();
     let kind = "car";
-    if (roll < 0.70) kind = "car";
-    else if (roll < 0.88) kind = "van";
-    else kind = "truck";
+    if (r < truckChance) kind = "truck";
+    else if (r < truckChance + vanChance) kind = "van";
 
-    const baseR = kind === "truck" ? rand(28, 36) : rand(16, 22);
-    const hp = kind === "truck" ? 12 : (kind === "van" ? 5 : 2);
+    const roadW = Math.min(520, W() * 0.72);
+    const roadX = (W() - roadW) / 2;
+
+    const baseR = kind === "truck" ? rand(28, 36) : (kind === "van" ? rand(22, 26) : rand(18, 22));
+    const hp = kind === "truck" ? 10 : (kind === "van" ? 5 : 2);
 
     enemies.push({
-      x: rand(60, W() - 60),
-      y: -60,
-      vx: rand(-25, 25),
-      vy: rand(120, 210) + world.difficulty * 18,
+      kind,
+      x: rand(roadX + 70, roadX + roadW - 70),
+      y: -80,
+      vx: rand(-22, 22),
+      vy: rand(140, 240) + world.difficulty * 16,
       r: baseR,
       hp,
-      kind,
-      shootT: rand(0.6, 1.4),
+      shootT: rand(0.9, 2.2),
     });
   }
 
-  function spawnPickup() {
-    // heal, mult, burst, dmg, guns
-    const r = Math.random();
-    let kind = "heal";
-    if (r < 0.30) kind = "heal";
-    else if (r < 0.48) kind = "mult";
-    else if (r < 0.62) kind = "burst";
-    else if (r < 0.82) kind = "dmg";
-    else kind = "guns";
+  function spawnBoss() {
+    bossAlive = true;
+    const roadW = Math.min(520, W() * 0.72);
+    const roadX = (W() - roadW) / 2;
+
+    enemies.push({
+      kind: "boss",
+      x: roadX + roadW / 2,
+      y: 90,
+      vx: 180,
+      vy: 0,
+      r: 44,
+      hp: 120 + Math.floor(world.difficulty * 35),
+      shootT: 0.25,
+    });
+  }
+
+  function dropFromEnemy(e) {
+    let dropChance = 0.22;
+    if (e.kind === "van") dropChance = 0.30;
+    if (e.kind === "truck") dropChance = 0.34;
+    if (e.kind === "boss") dropChance = 1.00;
+
+    if (Math.random() > dropChance) return;
+
+    let kind = "mult";
+
+    if (e.kind === "boss") {
+      kind = "guns"; // с босса всегда GUNS+
+    } else {
+      const r = Math.random();
+      if (r < 0.18) kind = "heal";
+      else if (r < 0.34) kind = "mult";
+      else if (r < 0.52) kind = "burst";
+      else if (r < 0.78) kind = "tier";
+      else kind = "ally";
+    }
 
     pickups.push({
-      x: rand(50, W() - 50),
-      y: -30,
-      vy: rand(140, 200),
+      x: e.x,
+      y: e.y,
+      vy: rand(40, 90),
       r: 14,
       kind,
       t: 0
     });
   }
 
+  // ===== Allies =====
+  function spawnAllies() {
+    allies.length = 0;
+    allies.push({ side: -1, alive: true, x: player.x - 36, y: player.y + 22, shootCd: 0 });
+    allies.push({ side:  1, alive: true, x: player.x + 36, y: player.y + 22, shootCd: 0 });
+  }
+
   // ===== FX =====
   function boom(x, y, base = 14) {
-    for (let i = 0; i < 28; i++) {
+    for (let i = 0; i < 32; i++) {
       particles.push({
         x, y,
-        vx: rand(-260, 260),
-        vy: rand(-260, 260),
-        life: rand(0.25, 0.7),
+        vx: rand(-280, 280),
+        vy: rand(-280, 280),
+        life: rand(0.25, 0.75),
         t: 0,
-        s: rand(1, 2.2) * base,
-        kind: Math.random() < 0.5 ? "spark" : "smoke"
+        s: rand(1, 2.3) * base,
+        kind: Math.random() < 0.55 ? "spark" : "smoke"
       });
     }
     world.shake = Math.min(14, world.shake + 8);
     if (!muted) navigator.vibrate?.(20);
   }
 
-  // ===== Drawing =====
-  function drawBackground(dt) {
-    const w = W(), h = H();
-
-    ctx.fillStyle = "#070A10";
-    ctx.fillRect(0, 0, w, h);
-
-    const fog = ctx.createRadialGradient(w * 0.5, h * 0.6, 40, w * 0.5, h * 0.6, Math.max(w, h) * 0.7);
-    fog.addColorStop(0, "rgba(0,255,200,0.06)");
-    fog.addColorStop(0.4, "rgba(70,110,255,0.04)");
-    fog.addColorStop(1, "rgba(0,0,0,0.85)");
-    ctx.fillStyle = fog;
-    ctx.fillRect(0, 0, w, h);
-
-    const roadW = Math.min(520, w * 0.72);
-    const roadX = (w - roadW) / 2;
-    ctx.fillStyle = "rgba(10,14,22,0.9)";
-    ctx.fillRect(roadX, 0, roadW, h);
-
-    // side rails
-    ctx.fillStyle = "rgba(0,170,255,0.18)";
-    ctx.fillRect(roadX - 3, 0, 2, h);
-    ctx.fillRect(roadX + roadW + 1, 0, 2, h);
-
-    // lane lines
-    world.laneGlow = clamp(world.laneGlow + dt * 0.6, 0, 1);
-    const lineW = 4;
-    const dashH = 34;
-    const gap = 22;
-    const speed = 460 + world.difficulty * 30;
-    const offset = (world.time * speed) % (dashH + gap);
-
-    ctx.globalAlpha = 0.95;
-    for (let i = 0; i < 3; i++) {
-      const x = roadX + roadW * ((i + 1) / 4) - lineW / 2;
-      for (let y = -dashH; y < h + dashH; y += dashH + gap) {
-        const yy = y + offset;
-        ctx.fillStyle = "rgba(255,120,40,0.55)";
-        ctx.fillRect(x, yy, lineW, dashH);
-      }
-    }
-    ctx.globalAlpha = 1;
-
-    // puddles
-    ctx.globalAlpha = 0.16;
-    for (let i = 0; i < 8; i++) {
-      const px = roadX + rand(40, roadW - 40);
-      const py = rand(0, h);
-      ctx.fillStyle = "rgba(0,210,255,0.35)";
-      ctx.beginPath();
-      ctx.ellipse(px, py, rand(20, 60), rand(6, 14), rand(0, Math.PI), 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // rain
-    ctx.globalAlpha = 0.12;
-    ctx.strokeStyle = "rgba(200,220,255,0.9)";
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 120; i++) {
-      const x = rand(0, w);
-      const y = rand(0, h);
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + 2, y + 10);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
+  function addScore(v) {
+    world.score += v * world.mult;
   }
 
+  function hurtPlayer(amount) {
+    if (player.invuln > 0) return;
+    world.hp -= amount;
+    player.invuln = 0.9;
+    world.mult = 1;
+    boom(player.x, player.y, 10);
+  }
+
+  // ===== Drawing helpers =====
   function roundRect(ctx, x, y, w, h, r) {
     const rr = Math.min(r, w / 2, h / 2);
     ctx.beginPath();
@@ -261,59 +273,202 @@
     ctx.closePath();
   }
 
-  function drawCarBody(x, y, r, colorA, colorB, detailColor, damaged = 0) {
+  function drawHeadlightCone(x, y, r, strength = 1) {
+    // светит "вверх" (вперёд)
+    const len = 180 + r * 2.6;
+    const w0 = r * 0.35;
+    const w1 = r * 2.4;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    const g = ctx.createLinearGradient(x, y - r, x, y - len);
+    g.addColorStop(0, `rgba(230,255,255,${0.10 * strength})`);
+    g.addColorStop(0.35, `rgba(0,210,255,${0.06 * strength})`);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(x - w0, y - r * 1.05);
+    ctx.lineTo(x - w1, y - len);
+    ctx.lineTo(x + w1, y - len);
+    ctx.lineTo(x + w0, y - r * 1.05);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawBrakeGlow(x, y, r, on) {
+    if (!on) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.65;
+
+    // два красных пятна сзади (вниз)
+    const gx = ctx.createRadialGradient(x - r * 0.45, y + r * 1.05, 2, x - r * 0.45, y + r * 1.05, r * 1.1);
+    gx.addColorStop(0, "rgba(255,40,60,0.35)");
+    gx.addColorStop(1, "rgba(255,40,60,0)");
+    ctx.fillStyle = gx;
+    ctx.beginPath();
+    ctx.arc(x - r * 0.45, y + r * 1.05, r * 1.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    const gx2 = ctx.createRadialGradient(x + r * 0.45, y + r * 1.05, 2, x + r * 0.45, y + r * 1.05, r * 1.1);
+    gx2.addColorStop(0, "rgba(255,40,60,0.35)");
+    gx2.addColorStop(1, "rgba(255,40,60,0)");
+    ctx.fillStyle = gx2;
+    ctx.beginPath();
+    ctx.arc(x + r * 0.45, y + r * 1.05, r * 1.05, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawCarBody(x, y, r, colorA, colorB, neon, damaged = 0) {
     ctx.save();
     ctx.translate(x, y);
 
-    // shadow
-    ctx.globalAlpha = 0.25;
+    // soft shadow
+    ctx.globalAlpha = 0.28;
     ctx.fillStyle = "#000";
     ctx.beginPath();
-    ctx.ellipse(0, 6, r * 0.95, r * 1.15, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 10, r * 1.05, r * 1.35, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = 1;
+
 
     // body
-    const g = ctx.createLinearGradient(0, -r, 0, r);
+    ctx.globalAlpha = 1;
+    const g = ctx.createLinearGradient(0, -r * 1.2, 0, r * 1.2);
     g.addColorStop(0, colorA);
     g.addColorStop(1, colorB);
     ctx.fillStyle = g;
-    roundRect(ctx, -r * 0.85, -r * 1.15, r * 1.7, r * 2.3, 8);
+    roundRect(ctx, -r * 0.92, -r * 1.28, r * 1.84, r * 2.56, 10);
     ctx.fill();
 
-    // roof
-    ctx.fillStyle = "rgba(230,240,255,0.22)";
-    roundRect(ctx, -r * 0.5, -r * 0.6, r, r * 1.1, 7);
-    ctx.fill();
-
-    // hood line
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    // panel line
+    ctx.strokeStyle = "rgba(255,255,255,0.12)";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(-r * 0.55, -r * 0.1);
-    ctx.lineTo(r * 0.55, -r * 0.1);
+    ctx.moveTo(-r * 0.62, -r * 0.32);
+    ctx.lineTo(r * 0.62, -r * 0.32);
     ctx.stroke();
 
-    // headlights
-    ctx.globalAlpha = 0.8;
-    ctx.fillStyle = detailColor;
-    ctx.beginPath(); ctx.ellipse(-r * 0.45, -r * 1.0, r * 0.18, r * 0.22, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.ellipse( r * 0.45, -r * 1.0, r * 0.18, r * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+    // glass
+    const glass = ctx.createLinearGradient(-r, -r, r, r);
+    glass.addColorStop(0, "rgba(220,240,255,0.18)");
+    glass.addColorStop(1, "rgba(20,40,60,0.25)");
+    ctx.fillStyle = glass;
+    roundRect(ctx, -r * 0.58, -r * 0.68, r * 1.16, r * 1.24, 9);
+    ctx.fill();
+
+    // wet shimmer
+    const shimmer = 0.5 + 0.5 * Math.sin(world.time * 2.2 + x * 0.01);
+    ctx.globalAlpha = 0.08 + shimmer * 0.10;
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    roundRect(ctx, -r * 0.78, -r * 1.08, r * 1.56, r * 0.58, 10);
+    ctx.fill();
     ctx.globalAlpha = 1;
 
-    // damage
+    // headlights (small)
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = neon;
+    ctx.beginPath(); ctx.ellipse(-r * 0.50, -r * 1.08, r * 0.19, r * 0.23, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse( r * 0.50, -r * 1.08, r * 0.19, r * 0.23, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // damage soot
     if (damaged > 0) {
       ctx.globalAlpha = 0.35;
-      ctx.fillStyle = "rgba(20,20,20,0.9)";
+      ctx.fillStyle = "rgba(10,10,10,0.9)";
       for (let i = 0; i < damaged; i++) {
         ctx.beginPath();
-        ctx.arc(rand(-r * 0.6, r * 0.6), rand(-r * 0.7, r * 0.7), rand(2, 5), 0, Math.PI * 2);
+        ctx.arc(rand(-r * 0.65, r * 0.65), rand(-r * 0.75, r * 0.75), rand(2, 6), 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha = 1;
     }
 
     ctx.restore();
+  }
+
+  function drawBackground() {
+    const w = W(), h = H();
+
+    ctx.fillStyle = "#070A10";
+    ctx.fillRect(0, 0, w, h);
+
+    // fog vignette
+    const fog = ctx.createRadialGradient(w * 0.5, h * 0.6, 40, w * 0.5, h * 0.6, Math.max(w, h) * 0.7);
+    fog.addColorStop(0, "rgba(0,255,200,0.06)");
+    fog.addColorStop(0.4, "rgba(70,110,255,0.04)");
+    fog.addColorStop(1, "rgba(0,0,0,0.88)");
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, 0, w, h);
+
+    const roadW = Math.min(520, w * 0.72);
+    const roadX = (w - roadW) / 2;
+
+    // road
+    ctx.fillStyle = "rgba(10,14,22,0.92)";
+    ctx.fillRect(roadX, 0, roadW, h);
+
+    // neon rails
+    ctx.fillStyle = "rgba(0,170,255,0.18)";
+    ctx.fillRect(roadX - 3, 0, 2, h);
+    ctx.fillRect(roadX + roadW + 1, 0, 2, h);
+
+    // lane lines
+    const lineW = 4, dashH = 34, gap = 22;
+    const speed = 480 + world.difficulty * 34;
+    const offset = (world.time * speed) % (dashH + gap);
+
+    ctx.globalAlpha = 0.92;
+    for (let i = 0; i < 3; i++) {
+      const x = roadX + roadW * ((i + 1) / 4) - lineW / 2;
+      for (let y = -dashH; y < h + dashH; y += dashH + gap) {
+        const yy = y + offset;
+        ctx.fillStyle = "rgba(255,120,40,0.52)";
+        ctx.fillRect(x, yy, lineW, dashH);
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // puddles
+    ctx.globalAlpha = 0.14;
+    for (let i = 0; i < 7; i++) {
+      const px = roadX + rand(40, roadW - 40);
+      const py = rand(0, h);
+      ctx.fillStyle = "rgba(0,210,255,0.35)";
+      ctx.beginPath();
+      ctx.ellipse(px, py, rand(20, 70), rand(6, 16), rand(0, Math.PI), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // rain
+    ctx.globalAlpha = 0.10;
+    ctx.strokeStyle = "rgba(200,220,255,0.9)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 120; i++) {
+      const x = rand(0, w);
+      const y = rand(0, h);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 2, y + 10);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // skid marks
+    for (const m of skidMarks) {
+      const a = clamp(m.life / m.maxLife, 0, 1) * 0.22;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = "rgba(0,0,0,0.9)";
+      ctx.fillRect(m.x - m.w, m.y, 3, 18);
+      ctx.fillRect(m.x + m.w, m.y, 3, 18);
+    }
+    ctx.globalAlpha = 1;
   }
 
   function draw() {
@@ -324,7 +479,7 @@
     ctx.save();
     ctx.translate(sx, sy);
 
-    drawBackground(0);
+    drawBackground();
 
     // pickups
     ctx.textAlign = "center";
@@ -332,48 +487,45 @@
     for (const p of pickups) {
       const glow = 0.35 + 0.25 * Math.sin(p.t * 10);
 
-      // shadow
       ctx.globalAlpha = 1;
       ctx.fillStyle = "rgba(0,0,0,0.35)";
       ctx.beginPath();
       ctx.arc(p.x, p.y + 6, p.r * 1.1, 0, Math.PI * 2);
       ctx.fill();
 
-      // color + label
       let col = "rgba(0,255,200,0.9)";
       if (p.kind === "heal") col = "rgba(0,255,160,0.95)";
       if (p.kind === "mult") col = "rgba(160,90,255,0.95)";
       if (p.kind === "burst") col = "rgba(255,120,40,0.95)";
-      if (p.kind === "dmg") col = "rgba(255,60,110,0.95)";
-      if (p.kind === "guns") col = "rgba(0,210,255,0.95)";
+      if (p.kind === "tier") col = "rgba(255,255,255,0.95)";
+      if (p.kind === "guns") col = "rgba(255,210,60,0.95)";
+      if (p.kind === "ally") col = "rgba(0,210,255,0.95)";
 
       const label =
         p.kind === "heal" ? "+" :
         p.kind === "mult" ? "x" :
         p.kind === "burst" ? "B" :
-        p.kind === "dmg" ? "DMG" : "G";
+        p.kind === "tier" ? "UP" :
+        p.kind === "guns" ? "G+" : "M";
 
-      // glow ring
       ctx.globalAlpha = glow;
       ctx.fillStyle = col;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r * 1.2, 0, Math.PI * 2);
       ctx.fill();
 
-      // core
       ctx.globalAlpha = 1;
       ctx.fillStyle = "rgba(0,0,0,0.55)";
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r * 0.9, 0, Math.PI * 2);
       ctx.fill();
 
-      // text
       ctx.fillStyle = "rgba(230,240,255,0.9)";
       ctx.font = "800 12px system-ui";
       ctx.fillText(label, p.x, p.y + 0.5);
     }
 
-    // bullets
+    // bullets (player)
     for (const b of bullets) {
       const bw = b.bw ?? 4;
       const bh = b.bh ?? 14;
@@ -389,75 +541,86 @@
       ctx.globalAlpha = 1;
     }
 
+    // enemy bullets
+    for (const b of enemyBullets) {
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = "rgba(0,255,140,0.85)";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.20;
+      ctx.fillStyle = "rgba(0,255,140,0.45)";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
     // enemies
     for (const e of enemies) {
-      const damaged = e.hp <= 3 ? 6 : (e.hp <= 7 ? 3 : 0);
+      if (e.kind === "boss") {
+        drawCarBody(e.x, e.y, e.r, "#2B2F3A", "#121825", "rgba(255,210,60,0.85)", e.hp < 60 ? 6 : 2);
+        ctx.save();
+        ctx.translate(e.x, e.y);
+        ctx.fillStyle = "rgba(0,0,0,0.35)";
+        roundRect(ctx, -e.r * 0.5, -e.r * 0.25, e.r, e.r * 0.4, 8);
+        ctx.fill();
+        ctx.restore();
+        // фары босса (чуть сильнее)
+        drawHeadlightCone(e.x, e.y, e.r, 1.15);
+        continue;
+      }
+
+      const damaged = e.hp <= 2 ? 6 : (e.hp <= 5 ? 3 : 0);
 
       if (e.kind === "car") {
         drawCarBody(e.x, e.y, e.r, "#1A1E2A", "#0E1320", "rgba(255,60,110,0.85)", damaged);
       } else if (e.kind === "van") {
         drawCarBody(e.x, e.y, e.r, "#22252E", "#11151F", "rgba(120,255,120,0.80)", damaged + 2);
-        ctx.save();
-        ctx.translate(e.x, e.y);
-        ctx.fillStyle = "rgba(255,255,255,0.12)";
-        roundRect(ctx, -e.r * 0.7, -e.r * 0.9, e.r * 1.4, e.r * 0.35, 6);
-        ctx.fill();
-        ctx.restore();
       } else {
-        // truck
-        ctx.save();
-        ctx.translate(e.x, e.y);
-
-        ctx.globalAlpha = 0.25;
-        ctx.fillStyle = "#000";
-        ctx.beginPath();
-        ctx.ellipse(0, 10, e.r * 1.2, e.r * 1.6, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-
-        const g = ctx.createLinearGradient(0, -e.r, 0, e.r);
-        g.addColorStop(0, "#2A2D38");
-        g.addColorStop(1, "#11151F");
-        ctx.fillStyle = g;
-        roundRect(ctx, -e.r * 0.95, -e.r * 1.55, e.r * 1.9, e.r * 3.1, 10);
-        ctx.fill();
-
-        ctx.fillStyle = "rgba(230,240,255,0.18)";
-        roundRect(ctx, -e.r * 0.75, -e.r * 1.25, e.r * 1.5, e.r * 0.9, 10);
-        ctx.fill();
-
-        ctx.globalAlpha = 0.8;
-        ctx.fillStyle = "rgba(0,255,140,0.85)";
-        ctx.beginPath(); ctx.ellipse(-e.r * 0.55, -e.r * 1.55, e.r * 0.20, e.r * 0.24, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.ellipse( e.r * 0.55, -e.r * 1.55, e.r * 0.20, e.r * 0.24, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.globalAlpha = 1;
-
-        if (damaged > 0) {
-          ctx.globalAlpha = 0.35;
-          ctx.fillStyle = "rgba(20,20,20,0.9)";
-          for (let i = 0; i < damaged; i++) {
-            ctx.beginPath();
-            ctx.arc(rand(-e.r * 0.7, e.r * 0.7), rand(-e.r * 1.0, e.r * 1.0), rand(2, 6), 0, Math.PI * 2);
-            ctx.fill();
-          }
-          ctx.globalAlpha = 1;
-        }
-
-        ctx.restore();
+        drawCarBody(e.x, e.y, e.r, "#2A2D38", "#11151F", "rgba(0,255,140,0.80)", damaged + 2);
       }
+
+      // фары врагов слабее
+      drawHeadlightCone(e.x, e.y, e.r, 0.55);
     }
+
+    // allies (moto)
+    for (const a of allies) {
+      if (!a.alive) continue;
+      ctx.save();
+      ctx.translate(a.x, a.y);
+
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = "rgba(0,210,255,0.9)";
+      ctx.beginPath();
+      ctx.ellipse(0, 10, 12, 18, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "rgba(10,14,22,0.9)";
+      roundRect(ctx, -8, -14, 16, 28, 8);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = "rgba(0,210,255,0.85)";
+      ctx.beginPath(); ctx.ellipse(0, -14, 3, 4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+    }
+
+    // player headlights + brake lights
+    const braking = joy.dy > 0.25; // джой вниз => стопы
+    drawHeadlightCone(player.x, player.y, player.r, 1.0);
+    drawBrakeGlow(player.x, player.y, player.r, braking);
 
     // player
     const inv = player.invuln > 0 ? 0.55 + 0.35 * Math.sin(world.time * 22) : 1;
     ctx.globalAlpha = inv;
     drawCarBody(player.x, player.y, player.r, "#1A2B3A", "#0B121C", "rgba(0,210,255,0.95)", 0);
 
-    ctx.globalAlpha = 0.25;
-    ctx.fillStyle = "rgba(0,210,255,0.9)";
-    ctx.beginPath();
-    ctx.ellipse(player.x, player.y + 10, player.r * 1.2, player.r * 1.4, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
 
     // particles
     for (const p of particles) {
@@ -478,10 +641,20 @@
     ctx.restore();
   }
 
-  // ===== Input =====
-  const joy = { active: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0, max: 46 };
+  // ===== Input (ONLY joystick) =====
+  const joy = { active: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0, max: 54 };
   const joyEl = document.getElementById("joy");
   const knobEl = document.getElementById("joyKnob");
+
+  // Force joystick center-bottom layout (works even without CSS edits)
+  function layoutJoystick() {
+    if (!joyEl || !knobEl) return;
+    joyEl.style.position = "fixed";
+    joyEl.style.left = "50%";
+    joyEl.style.bottom = "18px";
+    joyEl.style.transform = "translateX(-50%)";
+    joyEl.style.zIndex = "9999";
+  }
 
   function setKnob(dx, dy) {
     knobEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
@@ -508,8 +681,8 @@
     let dy = y - joy.cy;
     const len = Math.hypot(dx, dy) || 1;
     const m = Math.min(joy.max, len);
-    dx = dx / len * m;
-    dy = dy / len * m;
+    dx = (dx / len) * m;
+    dy = (dy / len) * m;
 
     joy.dx = dx / joy.max;
     joy.dy = dy / joy.max;
@@ -539,116 +712,94 @@
   window.addEventListener("mousemove", joyMove);
   window.addEventListener("mouseup", joyEnd);
 
-  let firing = false;
-  function fireOn(ev) { firing = true; ev.preventDefault?.(); }
-  function fireOff(ev) { firing = false; ev.preventDefault?.(); }
-
-  fireBtn.addEventListener("touchstart", fireOn, { passive: false });
-  fireBtn.addEventListener("touchend", fireOff, { passive: false });
-  fireBtn.addEventListener("touchcancel", fireOff, { passive: false });
-  fireBtn.addEventListener("mousedown", fireOn);
-  window.addEventListener("mouseup", fireOff);
-
-  canvas.addEventListener("touchstart", (ev) => {
-    const t = ev.changedTouches[0];
-    if (t.clientX > window.innerWidth * 0.55) firing = true;
-  }, { passive: true });
-  canvas.addEventListener("touchend", () => { firing = false; }, { passive: true });
-
   // ===== Mechanics =====
-  function shoot(dt) {
+  function shootAuto(dt) {
     player.fireCooldown -= dt;
-    if (!firing) return;
     if (player.fireCooldown > 0) return;
 
-    player.fireCooldown = 1 / player.fireRate;
-    const baseY = player.y - player.r - 2;
+    const tier = BULLET_TIERS[player.tier];
+    const fireRate = player.baseFireRate * tier.rateMul;
+    player.fireCooldown = 1 / fireRate;
 
-    const pattern =
-      player.guns === 1 ? [0] :
-      player.guns === 2 ? [-10, 10] :
-      player.guns === 3 ? [-14, 0, 14] :
-      [-22, -10, 0, 10, 22];
+    const dmg = player.baseDmg + tier.dmgAdd;
+    const count = clamp(player.guns, 1, 9);
 
-    const bw = 3 + Math.floor(player.dmg / 2);
-    const bh = 14 + player.dmg * 1.2;
-
-    const hue = clamp(player.bulletHue, 0, 210);
-    const colMain = `hsla(${hue}, 95%, 65%, 0.95)`;
-    const colGlow = `hsla(${hue}, 95%, 65%, 0.25)`;
-
-    for (const dx of pattern) {
-      bullets.push({
-        x: player.x + dx,
-        y: baseY,
-        vy: -820,
-        r: 4,
-        col: colMain,
-        glow: colGlow,
-        bw,
-        bh,
-        dmg: player.dmg
-      });
+    const spread = 8 + count * 2;
+    const offsets = [];
+    for (let i = 0; i < count; i++) {
+      const t = (count === 1) ? 0 : (i / (count - 1) * 2 - 1);
+      offsets.push(t * spread);
     }
 
-    particles.push({
-      x: player.x, y: baseY - 6,
-      vx: rand(-60, 60), vy: rand(-80, -160),
-      life: 0.2, t: 0, s: 10, kind: "spark"
-    });
-  }
+    const col = tierColor(player.tier, 0.95);
+    const glow = tierColor(player.tier, tier.glowA);
+    const bw = 3 + Math.floor(dmg / 2);
+    const bh = 12 + dmg * 1.6;
 
-  function hurtPlayer(amount) {
-    if (player.invuln > 0) return;
-    world.hp -= amount;
-    player.invuln = 0.9;
-    world.mult = 1;
-    boom(player.x, player.y, 10);
-  }
-
-  function addScore(v) {
-    world.score += v * world.mult;
+    for (const dx of offsets) {
+      bullets.push({
+        x: player.x + dx,
+        y: player.y - player.r - 2,
+        vy: -860,
+        r: 4,
+        col,
+        glow,
+        bw,
+        bh,
+        dmg
+      });
+    }
   }
 
   function applyPickup(kind) {
     if (kind === "heal") {
-      world.hp = Math.min(100, world.hp + 20);
-      world.mult = Math.min(9, world.mult + 1);
+      world.hp = Math.min(100, world.hp + 25);
+      addScore(20);
     } else if (kind === "mult") {
-      world.mult = Math.min(9, world.mult + 2);
+      world.mult = Math.min(9, world.mult + 1);
       addScore(30);
     } else if (kind === "burst") {
+      const col = tierColor(player.tier, 0.9);
+      const glow = tierColor(player.tier, 0.18);
       for (let i = -2; i <= 2; i++) {
         bullets.push({
-          x: player.x + i * 6,
+          x: player.x + i * 7,
           y: player.y - player.r - 2,
-          vy: -780,
+          vy: -820,
           r: 4,
-          col: "rgba(255,120,40,0.9)",
-          glow: "rgba(255,120,40,0.25)",
+          col,
+          glow,
           bw: 4,
           bh: 18,
           dmg: 1
         });
       }
-      addScore(20);
-    } else if (kind === "dmg") {
-      player.dmg = Math.min(9, player.dmg + 1);
-      // чем больше dmg — тем краснее (195 -> 175 -> ... -> 25)
-      player.bulletHue = Math.max(25, player.bulletHue - 20);
-      addScore(40);
+      addScore(25);
+    } else if (kind === "tier") {
+      player.tier = Math.min(BULLET_TIERS.length - 1, player.tier + 1);
+      addScore(60);
+      world.shake = Math.min(10, world.shake + 3);
     } else if (kind === "guns") {
-      if (player.guns === 1) player.guns = 2;
-      else if (player.guns === 2) player.guns = 3;
-      else if (player.guns === 3) player.guns = 5;
+      player.guns = Math.min(9, player.guns + 2);
+      addScore(120);
+      world.shake = Math.min(10, world.shake + 4);
+    } else if (kind === "ally") {
+      spawnAllies();
       addScore(40);
+      world.shake = Math.min(10, world.shake + 2);
     }
-    world.shake = Math.min(10, world.shake + 3);
   }
 
   function step(dt) {
     world.time += dt;
     world.difficulty = 1 + world.time / 25;
+
+    // boss each minute
+    bossTimer += dt;
+    if (!bossAlive && bossTimer >= 60) {
+      bossTimer = 0;
+      spawnBoss();
+    }
 
     // move player
     player.vx = joy.dx * player.speed;
@@ -663,48 +814,143 @@
 
     player.invuln = Math.max(0, player.invuln - dt);
 
-    shoot(dt);
-
-    // spawn enemies
-    enemySpawnT -= dt;
-    const spawnRate = clamp(0.55 - world.difficulty * 0.02, 0.18, 0.55);
-    if (enemySpawnT <= 0) {
-      enemySpawnT = spawnRate;
-      spawnEnemy();
-      if (Math.random() < 0.15) spawnEnemy();
+    // skid marks
+    const speedNow = Math.hypot(player.vx, player.vy);
+    if (speedNow > 240 && Math.random() < 0.35) {
+      skidMarks.push({ x: player.x, y: player.y + 14, life: 2.2, maxLife: 2.2, w: 10 + Math.random() * 8 });
+    }
+    for (let i = skidMarks.length - 1; i >= 0; i--) {
+      skidMarks[i].life -= dt;
+      skidMarks[i].y += (240 + world.difficulty * 22) * dt;
+      if (skidMarks[i].life <= 0 || skidMarks[i].y > H() + 60) skidMarks.splice(i, 1);
     }
 
-    // spawn pickups
-    pickupSpawnT -= dt;
-    if (pickupSpawnT <= 0) {
-      pickupSpawnT = rand(3.2, 5.5);
-      spawnPickup();
+    // auto shooting always
+    shootAuto(dt);
+
+    // progressive dense traffic
+    enemySpawnT -= dt;
+    const base = 0.75;
+    const minI = 0.18;
+    const interval = clamp(base - world.difficulty * 0.05, minI, base);
+
+    if (enemySpawnT <= 0) {
+      enemySpawnT = interval;
+
+      const pack = 1 + Math.floor(clamp(world.time / 35, 0, 3)); // 1..4
+      for (let i = 0; i < pack; i++) spawnEnemy();
+
+      if (world.time > 60 && Math.random() < 0.25) spawnEnemy();
     }
 
     // bullets update
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
       b.y += b.vy * dt;
-      if (b.y < -40) bullets.splice(i, 1);
+      if (b.y < -60) bullets.splice(i, 1);
     }
 
-    // enemies update + collision with player
-    for (let i = enemies.length - 1; i >= 0; i--) {
-      const e = enemies[i];
-      e.x += e.vx * dt;
-      e.y += e.vy * dt;
-      e.shootT -= dt;
+    // enemy bullets update + hit player
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+      const b = enemyBullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
 
-      e.x = clamp(e.x, roadX + 30, roadX + roadW - 30);
-
-      const rr = (e.r + player.r) * (e.r + player.r);
-      if (dist2(e.x, e.y, player.x, player.y) < rr) {
-        enemies.splice(i, 1);
-        hurtPlayer(14);
+      const rr = (b.r + player.r) * (b.r + player.r);
+      if (dist2(b.x, b.y, player.x, player.y) < rr) {
+        enemyBullets.splice(i, 1);
+        hurtPlayer(b.dmg);
         continue;
       }
 
-      if (e.y > H() + 80) enemies.splice(i, 1);
+      if (b.x < -80 || b.x > W() + 80 || b.y < -120 || b.y > H() + 120) enemyBullets.splice(i, 1);
+    }
+
+    // allies follow + shoot (auto with player)
+    for (const a of allies) {
+      if (!a.alive) continue;
+
+      const targetX = player.x + a.side * 36;
+      const targetY = player.y + 22;
+      a.x += (targetX - a.x) * dt * 10;
+      a.y += (targetY - a.y) * dt * 10;
+
+      a.shootCd -= dt;
+      if (a.shootCd <= 0) {
+        a.shootCd = 0.18;
+        const col = tierColor(player.tier, 0.85);
+        bullets.push({
+          x: a.x, y: a.y - 10,
+          vy: -900,
+          r: 4,
+          col,
+          glow: tierColor(player.tier, 0.16),
+          bw: 3,
+          bh: 12,
+          dmg: 1
+        });
+      }
+    }
+
+    // enemies update + collisions
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+
+      if (e.kind === "boss") {
+        e.x += e.vx * dt;
+        if (e.x < roadX + 90) { e.x = roadX + 90; e.vx *= -1; }
+        if (e.x > roadX + roadW - 90) { e.x = roadX + roadW - 90; e.vx *= -1; }
+
+        // boss shoots toward player
+        e.shootT -= dt;
+        if (e.shootT <= 0) {
+          e.shootT = 0.22;
+
+          const dx = player.x - e.x;
+          const dy = player.y - e.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const vx = (dx / len) * 260;
+          const vy = (dy / len) * 260;
+
+          const spread = 0.12 + clamp(world.difficulty * 0.01, 0, 0.18);
+          for (const s of [-spread, 0, spread]) {
+            const svx = vx * Math.cos(s) - vy * Math.sin(s);
+            const svy = vx * Math.sin(s) + vy * Math.cos(s);
+            enemyBullets.push({ x: e.x, y: e.y + e.r * 0.6, vx: svx, vy: svy, r: 4, dmg: 8 });
+          }
+        }
+
+      } else {
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        e.x = clamp(e.x, roadX + 30, roadX + roadW - 30);
+
+        if (e.y > H() + 100) enemies.splice(i, 1);
+      }
+
+      // enemy hits player
+      const rrP = (e.r + player.r) * (e.r + player.r);
+      if (dist2(e.x, e.y, player.x, player.y) < rrP) {
+        enemies.splice(i, 1);
+        if (e.kind === "boss") { bossAlive = false; hurtPlayer(30); }
+        else hurtPlayer(e.kind === "truck" ? 18 : 14);
+        continue;
+      }
+    }
+
+    // allies collide with enemies => ally disappears one by one
+    for (const e of enemies) {
+      if (e.kind === "boss") continue;
+      for (const a of allies) {
+        if (!a.alive) continue;
+        const rr = (e.r + 12) * (e.r + 12);
+        if (dist2(e.x, e.y, a.x, a.y) < rr) {
+          a.alive = false;
+          boom(a.x, a.y, 10);
+          e.hp -= 1;
+          break;
+        }
+      }
     }
 
     // pickups update
@@ -720,7 +966,7 @@
         continue;
       }
 
-      if (p.y > H() + 40) pickups.splice(i, 1);
+      if (p.y > H() + 60) pickups.splice(i, 1);
     }
 
     // bullet hits
@@ -731,21 +977,32 @@
       for (let ei = enemies.length - 1; ei >= 0; ei--) {
         const e = enemies[ei];
         const rr = (e.r + b.r) * (e.r + b.r);
+
         if (dist2(e.x, e.y, b.x, b.y) < rr) {
           e.hp -= b.dmg;
           hit = true;
 
           particles.push({
             x: b.x, y: b.y,
-            vx: rand(-140, 140), vy: rand(-140, 140),
+            vx: rand(-160, 160), vy: rand(-160, 160),
             life: 0.18, t: 0, s: 8, kind: "spark"
           });
 
           if (e.hp <= 0) {
-            boom(e.x, e.y, 14);
-            const score = e.kind === "truck" ? 35 : (e.kind === "van" ? 18 : 10);
+            boom(e.x, e.y, e.kind === "boss" ? 22 : 14);
+
+            const score =
+              e.kind === "boss" ? 600 :
+              e.kind === "truck" ? 35 :
+              e.kind === "van" ? 18 : 10;
+
             addScore(score);
             world.mult = Math.min(9, world.mult + 1);
+
+            dropFromEnemy(e);
+
+            if (e.kind === "boss") bossAlive = false;
+
             enemies.splice(ei, 1);
           } else {
             addScore(2);
@@ -768,6 +1025,7 @@
       if (p.t >= p.life) particles.splice(i, 1);
     }
 
+    // passive score
     world.score += dt * 2.0 * world.mult;
 
     if (world.hp <= 0) gameOver();
@@ -804,9 +1062,10 @@
 
   function boot() {
     resize();
+    layoutJoystick();
     overlay.classList.remove("hidden");
     title.textContent = "Neon Car Shooter";
-    subtitle.textContent = "Мрачный неон. Реальные тачки недалёкого будущего. Стреляй и выживай.";
+    subtitle.textContent = "Авто-стрельба. Джойстик снизу по центру. Фары/стопы работают.";
     resetGame();
     draw();
   }
